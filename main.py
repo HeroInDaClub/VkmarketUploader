@@ -27,12 +27,6 @@ USER_DATA_FILE = "user_data.json"
 # Возможные заголовки столбцов для переименования
 HEADER_OPTIONS = ["Название", "Фото", "Описание", "Цена", "Количество", "Другое"]
 
-
-
-
-
-
-
 def save_user_data(data):
     with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
