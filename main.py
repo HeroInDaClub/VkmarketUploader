@@ -26,7 +26,12 @@ REDIRECT_URI = "https://oauth.vk.com/blank.html"
 API_VERSION = "5.199"
 USER_DATA_FILE = "user_data.json"
 
+<<<<<<< HEAD
 HEADER_OPTIONS = ["Не использовать", "Название", "Фото", "Описание", "Цена", "Количество", "Другое"]
+=======
+# Возможные заголовки столбцов для переименования
+HEADER_OPTIONS = ["Название", "Фото", "Описание", "Цена", "Количество", "Другое"]
+>>>>>>> a776fbef11885c14a177b9e23aa0170dea8546fa
 
 def save_user_data(data):
     with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
