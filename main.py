@@ -7,16 +7,18 @@ import json
 import requests
 from urllib.parse import urlparse, parse_qs
 from io import StringIO
+import time
 
 import pandas as pd
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton,
-    QLabel, QScrollArea, QMessageBox,
-    QHBoxLayout, QComboBox, QTableWidget, QTableWidgetItem, QSizePolicy, QTextEdit, QHeaderView
+    QLabel, QScrollArea, QMessageBox, QDialog, QDialogButtonBox,
+    QHBoxLayout, QComboBox, QTableWidget, QTableWidgetItem, QSizePolicy,
+    QTextEdit, QHeaderView, QProgressDialog, QInputDialog
 )
-from PySide6.QtGui import QFont, QPixmap
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QFont, QPixmap, QIcon
+from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 CLIENT_ID = "6121396"  # Замените на свой
@@ -24,21 +26,17 @@ REDIRECT_URI = "https://oauth.vk.com/blank.html"
 API_VERSION = "5.199"
 USER_DATA_FILE = "user_data.json"
 
-# Возможные заголовки столбцов для переименования
-HEADER_OPTIONS = ["Название", "Фото", "Описание", "Цена", "Количество", "Другое"]
-
+HEADER_OPTIONS = ["Не использовать", "Название", "Фото", "Описание", "Цена", "Количество", "Другое"]
 
 def save_user_data(data):
     with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
-
 
 def load_user_data():
     if os.path.exists(USER_DATA_FILE):
         with open(USER_DATA_FILE, encoding="utf-8") as f:
             return json.load(f)
     return None
-
 
 class AuthWindow(QWidget):
     def __init__(self, on_token_received):
@@ -71,7 +69,6 @@ class AuthWindow(QWidget):
                 save_user_data({"access_token": token})
                 self.on_token_received(token)
                 self.close()
-
 
 class GroupSelector(QWidget):
     def __init__(self, token, on_group_selected, logout_callback):
@@ -139,15 +136,20 @@ class GroupSelector(QWidget):
         card.mousePressEvent = lambda e, gid=group["id"], gname=group["name"]: self.on_group_selected(gid, gname)
         self.content_layout.addWidget(card)
 
-
 class TableFormatWindow(QWidget):
-    def __init__(self, go_back_callback):
+    def __init__(self, token, group_id, group_name, go_back_callback):
         super().__init__()
+        self.token = token
+        self.group_id = group_id
+        self.group_name = group_name
         self.go_back_callback = go_back_callback
-        self.setWindowTitle("Table Formatter")
+        self.setWindowTitle(f"Table Formatter - {group_name}")
         self.resize(900, 600)
 
-        # Размеры шрифтов и кнопок покрупнее
+        self.column_types = {}
+        self.df = None
+        self.selected_category_id = None
+
         self.setStyleSheet("""
             QWidget { font-size: 14pt; }
             QPushButton { font-size: 16pt; min-height: 40px; padding: 8px; }
@@ -157,12 +159,10 @@ class TableFormatWindow(QWidget):
 
         layout = QVBoxLayout(self)
 
-        # Кнопка «Назад»
         back_btn = QPushButton("← Назад")
         back_btn.clicked.connect(self.go_back_callback)
         layout.addWidget(back_btn)
 
-        # Метка и поле ввода
         self.input_label = QLabel("Входные данные:")
         layout.addWidget(self.input_label)
 
@@ -172,70 +172,333 @@ class TableFormatWindow(QWidget):
         self.input.textChanged.connect(self.process_text)
         layout.addWidget(self.input)
 
-        # Таблица создаётся один раз, но сразу скрывается
+        self.upload_btn = QPushButton("Добавить товары")
+        self.upload_btn.clicked.connect(self.upload_items)
+        self.upload_btn.setEnabled(False)
+        layout.addWidget(self.upload_btn)
+
         self.table = QTableWidget()
         self.table.hide()
         layout.addWidget(self.table)
 
+    def get_product_categories(self):
+        """Получаем список категорий для товаров сообщества"""
+        try:
+            response = requests.get(
+                "https://api.vk.com/method/market.getCategories",
+                params={
+                    "owner_id": f"-{abs(self.group_id)}",
+                    "access_token": self.token,
+                    "v": API_VERSION
+                }
+            ).json()
+
+            if "error" in response:
+                QMessageBox.critical(self, "Ошибка",
+                                     f"Ошибка при получении категорий: {response['error']['error_msg']}")
+                return None
+
+            return response.get("response", {}).get("items", [])
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при получении категорий: {str(e)}")
+            return None
+
+    def show_category_dialog(self):
+        """Показываем диалог выбора категории"""
+        categories = self.get_product_categories()
+        if not categories:
+            # Создаем базовые категории, если их нет
+            categories = [
+                {"id": 1, "name": "Одежда"},
+                {"id": 2, "name": "Обувь"},
+                {"id": 3, "name": "Аксессуары"},
+                {"id": 4, "name": "Электроника"},
+                {"id": 5, "name": "Другое"}
+            ]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Выбор категории")
+        dialog.setMinimumWidth(400)
+
+        layout = QVBoxLayout()
+
+        label = QLabel("Выберите категорию для товаров:")
+        layout.addWidget(label)
+
+        category_combo = QComboBox()
+        for category in categories:
+            category_combo.addItem(category["name"], category["id"])
+
+        # Добавляем возможность создания новой категории
+        category_combo.addItem("+ Создать новую категорию", -1)
+        layout.addWidget(category_combo)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        dialog.setLayout(layout)
+
+        if dialog.exec() == QDialog.Accepted:
+            selected_id = category_combo.currentData()
+            if selected_id == -1:
+                # Создаем новую категорию
+                new_category, ok = QInputDialog.getText(
+                    self, "Новая категория", "Введите название новой категории:")
+                if ok and new_category:
+                    # Здесь можно добавить логику создания категории через API
+                    return {"id": len(categories)+1, "name": new_category}
+                return None
+            return {"id": selected_id, "name": category_combo.currentText()}
+        return None
+
     def process_text(self):
         raw = self.input.toPlainText().strip()
 
-        # Если поле пустое — вернуть ввод и скрыть таблицу
         if not raw:
             self.table.hide()
             self.input_label.show()
             self.input.show()
+            self.upload_btn.setEnabled(False)
             return
 
-        # Определяем разделитель
         first = raw.splitlines()[0]
         for sep in ['\t', ',', ';']:
             if sep in first:
                 break
 
-        # Пытаемся разобрать DataFrame
         try:
-            df = pd.read_csv(StringIO(raw), sep=sep)
+            self.df = pd.read_csv(StringIO(raw), sep=sep)
         except Exception as e:
-            # При ошибке тоже скрываем таблицу и показываем ввод
             self.table.hide()
             self.input_label.show()
             self.input.show()
+            self.upload_btn.setEnabled(False)
             QMessageBox.critical(self, "Ошибка при разборе таблицы", str(e))
             return
 
-        # Успешно распарсили — прячем ввод, показываем таблицу и заполняем её
         self.input_label.hide()
         self.input.hide()
         self.table.show()
-        self.populate_table(df)
+        self.upload_btn.setEnabled(True)
+        self.populate_table(self.df)
 
     def populate_table(self, df: pd.DataFrame):
-        # (сюда вставьте вашу логику разбора фото-столбца и создания виджетов)
         rows, cols = df.shape
         self.table.clear()
         self.table.setRowCount(rows + 1)
         self.table.setColumnCount(cols)
-        # заголовки — комбобоксы
+
         for j, col in enumerate(df.columns):
             combo = QComboBox()
             combo.addItems(HEADER_OPTIONS)
+            combo.setCurrentText("Не использовать")
+            combo.currentTextChanged.connect(lambda text, col=j: self.update_column_type(col, text))
             self.table.setCellWidget(0, j, combo)
-        # данные
+
         for i in range(rows):
             for j, val in enumerate(df.iloc[i]):
                 self.table.setItem(i+1, j, QTableWidgetItem(str(val)))
-        # подгоняем ширины
+
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setDefaultSectionSize(150)
         header.setMaximumSectionSize(300)
 
+    def update_column_type(self, column_index, column_type):
+        self.column_types[column_index] = column_type
+
+    def upload_items(self):
+        if not hasattr(self, 'df') or self.df is None:
+            QMessageBox.warning(self, "Ошибка", "Нет данных для загрузки")
+            return
+
+        # Выбираем категорию
+        category = self.show_category_dialog()
+        if not category:
+            return
+
+        self.selected_category_id = category["id"]
+        category_name = category["name"]
+
+        # Собираем данные из таблицы, игнорируя колонки с "Не использовать"
+        items = []
+        required_fields = {"Название", "Описание", "Цена"}
+        used_columns = {k: v for k, v in self.column_types.items() if v != "Не использовать"}
+
+        # Проверяем обязательные поля
+        missing_fields = required_fields - set(used_columns.values())
+        if missing_fields:
+            QMessageBox.warning(self, "Ошибка",
+                                f"Не выбраны обязательные поля: {', '.join(missing_fields)}")
+            return
+
+        for i in range(len(self.df)):
+            item = {
+                "name": "",
+                "description": "",
+                "price": 0,
+                "quantity": 1,
+                "photo_url": "",
+                "category": category_name
+            }
+
+            for j in used_columns:
+                col_type = used_columns[j]
+                value = str(self.df.iloc[i, j])
+
+                if col_type == "Название":
+                    item["name"] = value
+                elif col_type == "Описание":
+                    item["description"] = value
+                elif col_type == "Цена":
+                    try:
+                        item["price"] = float(value)
+                    except:
+                        item["price"] = 0
+                elif col_type == "Количество":
+                    try:
+                        item["quantity"] = int(value)
+                    except:
+                        item["quantity"] = 1
+                elif col_type == "Фото":
+                    item["photo_url"] = value
+
+            # Проверка данных перед добавлением
+            if len(item["name"]) < 4:
+                QMessageBox.warning(self, "Ошибка",
+                                    f"Строка {i+1}: Название слишком короткое (мин. 4 символа)")
+                continue
+
+            if not item["description"]:
+                QMessageBox.warning(self, "Ошибка",
+                                    f"Строка {i+1}: Отсутствует описание")
+                continue
+
+            if item["price"] <= 0:
+                QMessageBox.warning(self, "Ошибка",
+                                    f"Строка {i+1}: Цена должна быть больше 0")
+                continue
+
+            items.append(item)
+
+        if not items:
+            QMessageBox.warning(self, "Ошибка", "Нет товаров для загрузки после проверки")
+            return
+
+        progress = QProgressDialog("Загрузка товаров...", "Отмена", 0, len(items), self)
+        progress.setWindowTitle("Загрузка")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        success_count = 0
+        for i, item in enumerate(items):
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+
+            try:
+                # Загрузка фото (если указано)
+                photo_ids = []
+                if item["photo_url"]:
+                    try:
+                        # Получаем сервер для загрузки
+                        upload_server = requests.get(
+                            "https://api.vk.com/method/photos.getMarketUploadServer",
+                            params={
+                                "group_id": abs(self.group_id),
+                                "main_photo": 1,
+                                "access_token": self.token,
+                                "v": API_VERSION
+                            }
+                        ).json()
+
+                        if "error" in upload_server:
+                            raise Exception(upload_server["error"]["error_msg"])
+
+                        upload_url = upload_server["response"]["upload_url"]
+
+                        # Загружаем фото по URL
+                        photo_data = requests.get(item["photo_url"], timeout=10).content
+                        upload_response = requests.post(
+                            upload_url,
+                            files={"file": ("photo.jpg", photo_data, "image/jpeg")},
+                            timeout=30
+                        ).json()
+
+                        if "error" in upload_response:
+                            raise Exception(upload_response["error"]["error_msg"])
+
+                        # Сохраняем фото
+                        save_response = requests.get(
+                            "https://api.vk.com/method/photos.saveMarketPhoto",
+                            params={
+                                "group_id": abs(self.group_id),
+                                "photo": upload_response["photo"],
+                                "server": upload_response["server"],
+                                "hash": upload_response["hash"],
+                                "crop_data": upload_response.get("crop_data", ""),
+                                "crop_hash": upload_response.get("crop_hash", ""),
+                                "access_token": self.token,
+                                "v": API_VERSION
+                            }
+                        ).json()
+
+                        if "error" in save_response:
+                            raise Exception(save_response["error"]["error_msg"])
+
+                        photo_ids = [str(photo["id"]) for photo in save_response["response"]]
+
+                    except Exception as e:
+                        print(f"Ошибка загрузки фото: {str(e)}")
+                        QMessageBox.warning(self, "Ошибка фото",
+                                            f"Не удалось загрузить фото для товара {item['name']}: {str(e)}")
+
+                # Создаем товар в сообществе (ключевое изменение - owner_id с минусом)
+                params = {
+                    "owner_id": f"-{abs(self.group_id)}",  # Отрицательный ID для сообщества
+                    "name": item["name"],
+                    "description": item["description"],
+                    "category_id": self.selected_category_id,
+                    "price": item["price"],
+                    "access_token": self.token,
+                    "v": API_VERSION
+                }
+
+                if photo_ids:
+                    params["main_photo_id"] = photo_ids[0]
+
+                response = requests.get("https://api.vk.com/method/market.add", params=params).json()
+
+                if "error" in response:
+                    error_msg = response['error']['error_msg']
+                    if "name should be at least 4 letters" in error_msg:
+                        error_msg = "Название должно содержать минимум 4 символа"
+                    QMessageBox.warning(self, "Ошибка",
+                                        f"Ошибка при добавлении товара {item['name']}:\n{error_msg}")
+                else:
+                    success_count += 1
+
+                time.sleep(0.5)  # Задержка между запросами
+
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка",
+                                    f"Ошибка при добавлении товара {item['name']}:\n{str(e)}")
+
+        progress.setValue(len(items))
+        QMessageBox.information(
+            self,
+            "Готово",
+            f"Загрузка завершена!\nУспешно добавлено: {success_count}/{len(items)} товаров\n"
+            f"Категория: {category_name}"
+        )
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VK Market Uploader / Table Formatter")
+        self.setWindowTitle("VK Product Uploader")
         self.resize(900, 600)
         user = load_user_data()
         if user and user.get("access_token"):
@@ -259,11 +522,15 @@ class MainWindow(QMainWindow):
             self.show_auth
         ))
 
-    def show_table_formatter(self, group_id=None, group_name=None):
-        self.setCentralWidget(TableFormatWindow(self.show_group_selector))
+    def show_table_formatter(self, group_id, group_name):
+        self.setCentralWidget(TableFormatWindow(
+            self.user_token,
+            group_id,
+            group_name,
+            self.show_group_selector
+        ))
 
 if __name__ == "__main__":
-    from PySide6.QtGui import QIcon
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon("img/icon.ico"))
     window = MainWindow()
