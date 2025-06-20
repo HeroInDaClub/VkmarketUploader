@@ -10,10 +10,6 @@ from io import StringIO
 
 import pandas as pd
 
-
-
-
-
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton,
     QLabel, QScrollArea, QMessageBox,
